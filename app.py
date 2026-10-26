@@ -1,6 +1,8 @@
 import uuid
 import csv
 import io
+import json
+from urllib.request import Request, urlopen
 from datetime import date
 import streamlit as st
 
@@ -17,16 +19,54 @@ def new_pane():
 if "panes" not in st.session_state:
     st.session_state.panes = [new_pane()]
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_nbg_rate():
+    url = "https://nbg.gov.ge/gw/api/ct/monetarypolicy/currencies/ka/json/?currencies=USD"
+    req = Request(url, headers={"User-Agent": "GlassX-Calculator/1.0", "Accept": "application/json"})
+    with urlopen(req, timeout=7) as response:
+        payload = json.load(response)
+    entry = payload[0]
+    dollar = next(item for item in entry["currencies"] if item["code"] == "USD")
+    return float(dollar["rate"]) / float(dollar.get("quantity", 1)), str(entry.get("date", ""))
+
+
+if "nbg_checked" not in st.session_state:
+    try:
+        rate, rate_date = fetch_nbg_rate()
+        st.session_state["usd_rate"] = rate
+        st.session_state["nbg_date"] = rate_date
+        st.session_state["nbg_error"] = False
+    except Exception:
+        st.session_state["usd_rate"] = 2.60
+        st.session_state["nbg_date"] = ""
+        st.session_state["nbg_error"] = True
+    st.session_state["nbg_checked"] = True
+
 with st.expander("ფასი და პარამეტრები", expanded=True):
     currency = st.selectbox("ფასის ვალუტა", ["USD", "GEL"])
-    unit_price = st.number_input("გასაყიდი ფასი 1 მ²-ზე", min_value=0.0, value=0.0, step=1.0)
-    installation_rate = st.number_input("მონტაჟის ფასი 1 მ²-ზე (არჩეულ ვალუტაში)", min_value=0.0, value=0.0, step=1.0)
-    usd_rate = st.number_input("დოლარის კურსი (1 USD = GEL)", min_value=0.01, value=2.60, step=0.01, format="%.4f")
+    unit_price = st.number_input("გასაყიდი ფასი 1 მ²-ზე", min_value=0.0, value=150.0, step=1.0)
+    installation_rate = st.number_input("მონტაჟის ფასი 1 მ²-ზე (არჩეულ ვალუტაში)", min_value=0.0, value=30.0, step=1.0)
+    usd_rate = st.number_input("დოლარის კურსი (1 USD = GEL)", min_value=0.01, step=0.01, format="%.4f", key="usd_rate")
+    if st.session_state.get("nbg_error"):
+        st.warning("ეროვნული ბანკის კურსი ვერ ჩაიტვირთა. გადაამოწმე და ხელით შეცვალე კურსი (2.60 მხოლოდ დროებითი მნიშვნელობაა).")
+    else:
+        st.caption(f"NBG-ის ოფიციალური კურსი • {st.session_state.get('nbg_date', '')} • შესაძლებელია ხელით შეცვლა")
+    if st.button("🔄 NBG კურსის განახლება"):
+        fetch_nbg_rate.clear()
+        try:
+            rate, rate_date = fetch_nbg_rate()
+            st.session_state["usd_rate"] = rate
+            st.session_state["nbg_date"] = rate_date
+            st.session_state["nbg_error"] = False
+        except Exception:
+            st.session_state["nbg_error"] = True
+        st.rerun()
 
 with st.expander("დამკვეთის მონაცემები", expanded=False):
     customer_first = st.text_input("სახელი")
     customer_last = st.text_input("გვარი")
     customer_phone = st.text_input("ტელეფონი")
+    customer_address = st.text_input("მისამართი")
     order_date = st.date_input("თარიღი", value=date.today())
 
 st.subheader("მინები")
@@ -173,6 +213,7 @@ else:
         writer.writerow(["დამკვეთის სახელი", customer_first])
         writer.writerow(["დამკვეთის გვარი", customer_last])
         writer.writerow(["ტელეფონი", customer_phone])
+        writer.writerow(["მისამართი", customer_address])
         writer.writerow(["თარიღი", order_date.isoformat()])
         writer.writerow([])
         writer.writerow(["შუშა №", "სიგანე (სმ)", "სიმაღლე (სმ)", "რაოდენობა", "ფართობი (მ²)"])
