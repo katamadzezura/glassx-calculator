@@ -1,4 +1,7 @@
 import uuid
+import csv
+import io
+from datetime import date
 import streamlit as st
 
 ROLL_WIDTH = 150.0
@@ -15,9 +18,16 @@ if "panes" not in st.session_state:
     st.session_state.panes = [new_pane()]
 
 with st.expander("ფასი და პარამეტრები", expanded=True):
-    currency = st.selectbox("ფასის ვალუტა", ["GEL", "USD"])
+    currency = st.selectbox("ფასის ვალუტა", ["USD", "GEL"])
     unit_price = st.number_input("გასაყიდი ფასი 1 მ²-ზე", min_value=0.0, value=0.0, step=1.0)
+    installation_rate = st.number_input("მონტაჟის ფასი 1 მ²-ზე (არჩეულ ვალუტაში)", min_value=0.0, value=0.0, step=1.0)
     usd_rate = st.number_input("დოლარის კურსი (1 USD = GEL)", min_value=0.01, value=2.60, step=0.01, format="%.4f")
+
+with st.expander("დამკვეთის მონაცემები", expanded=False):
+    customer_first = st.text_input("სახელი")
+    customer_last = st.text_input("გვარი")
+    customer_phone = st.text_input("ტელეფონი")
+    order_date = st.date_input("თარიღი", value=date.today())
 
 st.subheader("მინები")
 a, b = st.columns(2)
@@ -68,7 +78,7 @@ def pack(order):
     shelves, positions = [], []
     for piece in order:
         orientations = [(piece["width"], piece["height"], False)]
-        if piece["rotate"] and piece["width"] != piece["height"]:
+        if (piece["rotate"] or piece["width"] > ROLL_WIDTH) and piece["width"] != piece["height"]:
             orientations.append((piece["height"], piece["width"], True))
         best = None
         for w, h, rotated in orientations:
@@ -110,15 +120,21 @@ else:
     ]
     results = [r for order in orders if (r := pack(order)) is not None]
     if not results:
-        st.error("ერთი ან მეტი მინა 150 სმ რულონში ვერ ეტევა დაშვებული ტრიალის პირობებში. შეამოწმე ზომები ან ჩართე შესაბამისი მინის ტრიალი.")
+        st.error("ერთი ან მეტი მინა 150 სმ რულონში ვერ ეტევა, 90°-ით შემოტრიალების შემთხვევაშიც. შეამოწმე ზომები.")
     else:
         length, positions, shelves = min(results, key=lambda r: r[0])
         area = ROLL_WIDTH * length / 10000
         used = sum(p["width"] * p["height"] for p in pieces) / 10000
         waste = max(0.0, area - used)
+        glass_area = used
+        installation_total = glass_area * installation_rate
+        installation_gel = installation_total if currency == "GEL" else installation_total * usd_rate
+        installation_usd = installation_total / usd_rate if currency == "GEL" else installation_total
         total = area * unit_price
         total_gel = total if currency == "GEL" else total * usd_rate
         total_usd = total / usd_rate if currency == "GEL" else total
+        grand_gel = total_gel + installation_gel
+        grand_usd = grand_gel / usd_rate
         st.subheader("შედეგი")
         st.metric("ფირის ფასი", f"{total:,.2f} {'₾' if currency == 'GEL' else '$'}")
         a, b = st.columns(2)
@@ -128,7 +144,11 @@ else:
         a.metric("საჭირო ფირი", f"{area:.3f} მ²")
         b.metric("რულონის სიგრძე", f"{length:.1f} სმ")
         st.write(f"მინების რაოდენობა: **{len(pieces)}** | დარჩენილი ფართობი: **{waste:.3f} მ²**")
-        st.info("მონტაჟი — ინდივიდუალური შეფასებით.")
+        st.metric("მინების საერთო ფართობი", f"{glass_area:.3f} მ²")
+        st.metric("მონტაჟის ღირებულება", f"{installation_total:,.2f} {'₾' if currency == 'GEL' else '$'}")
+        a, b = st.columns(2)
+        a.metric("საბოლოო ჯამი ლარში", f"{grand_gel:,.2f} ₾")
+        b.metric("საბოლოო ჯამი დოლარში", f"{grand_usd:,.2f} $")
         st.subheader("ჭრის სქემა")
         from html import escape
         height_px = max(100, min(900, int(length * min(3.0, 850.0 / max(length, 1)) + 40)))
@@ -146,9 +166,36 @@ else:
         svg.append(f'<text x="85" y="{length+18:.2f}" fill="#333" font-size="9" text-anchor="middle">150 სმ</text></svg>')
         st.components.v1.html("".join(svg), height=height_px, scrolling=True)
         st.caption("ყვითელი — დარჩენილი ფირი. სქემა წინასწარია; ოპტიმალურობის გარანტია არ აქვს. ჭრის დანაკარგი და ნარჩენების საწყობი ჯერ არ არის ჩართული.")
-        lines = ["GlassX - Price Estimate"]
-        for index, pane in enumerate(st.session_state.panes):
+        # შეკვეთის ფაილი: მხოლოდ შუშების ფართობები და ფასები, ჭრის სქემის გარეშე.
+        output = io.StringIO(newline="")
+        writer = csv.writer(output)
+        writer.writerow(["GlassX — შეკვეთის შეფასება"])
+        writer.writerow(["დამკვეთის სახელი", customer_first])
+        writer.writerow(["დამკვეთის გვარი", customer_last])
+        writer.writerow(["ტელეფონი", customer_phone])
+        writer.writerow(["თარიღი", order_date.isoformat()])
+        writer.writerow([])
+        writer.writerow(["შუშა №", "სიგანე (სმ)", "სიმაღლე (სმ)", "რაოდენობა", "ფართობი (მ²)"])
+        for index, pane in enumerate(st.session_state.panes, 1):
             pid = pane["id"]
-            lines.append(f"Glass {index+1}: {st.session_state[f'w_{pid}']} x {st.session_state[f'h_{pid}']} cm - {st.session_state[f'q_{pid}']} pcs; rotation: {'yes' if pane['rotate'] else 'no'}")
-        lines.append(f"Roll length: {length:.2f} cm\nBillable area: {area:.3f} m2\nWaste: {waste:.3f} m2\nPrice: {total:.2f} {currency}\nGEL: {total_gel:.2f}\nUSD: {total_usd:.2f}\nUSD exchange rate: {usd_rate:.4f}\nInstallation: separate estimate")
-        st.download_button("📄 შედეგის შენახვა (TXT)", data="\n".join(lines), file_name="glassx-estimate.txt", mime="text/plain")
+            w = float(st.session_state[f"w_{pid}"])
+            h = float(st.session_state[f"h_{pid}"])
+            q = int(st.session_state[f"q_{pid}"])
+            writer.writerow([index, w, h, q, round(w * h * q / 10000, 4)])
+        writer.writerow([])
+        writer.writerow(["შუშების საერთო ფართობი (მ²)", round(glass_area, 3)])
+        writer.writerow(["ფირის საანგარიშო ფართობი (მ²)", round(area, 3)])
+        writer.writerow(["ფირის ფასი 1 მ²-ზე", round(unit_price, 2), currency])
+        writer.writerow(["ფირის ღირებულება", round(total, 2), currency])
+        writer.writerow(["დოლარის კურსი", round(usd_rate, 4)])
+        writer.writerow(["მონტაჟის ფასი 1 მ²-ზე (არჩეულ ვალუტაში)", round(installation_rate, 2)])
+        writer.writerow(["მონტაჟის ღირებულება", round(installation_total, 2), currency])
+        writer.writerow(["საბოლოო ჯამი (₾)", round(grand_gel, 2)])
+        writer.writerow(["საბოლოო ჯამი ($)", round(grand_usd, 2)])
+        st.download_button(
+            "📥 შეკვეთის ჩამოტვირთვა (Excel/CSV)",
+            data=("\ufeff" + output.getvalue()).encode("utf-8"),
+            file_name=f"GlassX_order_{order_date.isoformat()}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
